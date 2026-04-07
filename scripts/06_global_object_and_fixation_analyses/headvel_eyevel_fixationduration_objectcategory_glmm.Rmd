@@ -1,0 +1,445 @@
+---
+title: "headvel_prior_to_category_glmm"
+output: html_document
+date: "2025-11-24"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)   # dplyr, ggplot2, etc.
+library(glmmTMB)
+library(gghalves)
+library(car)
+library(DHARMa)
+
+# ---------------------------------------------------------
+# Load data
+# ---------------------------------------------------------
+ctx_fixations <- read.csv("C:/Users/Marcel/Desktop/Study Project/VR Data/ctx_fixations.csv")
+
+# Convert seconds → milliseconds
+ctx_fixations$length_ms <- ctx_fixations$length * 1000
+
+cat_col  <- "ObjectCategoryMerged"
+subj_col <- "SubjectID"
+
+# Desired category order and colors (shared)
+desired_order <- c("Background", "Building", "Landmark", "Body", "Face")
+
+palette_vals <- c(
+  Background = "#1f77b4",
+  Building   = "#ff7f0e",
+  Landmark   = "#2ca02c",
+  Body       = "#d62728",
+  Face       = "#9467bd"
+)
+```
+```{r}
+# =========================================================
+# RESIDUAL DIAGNOSTICS HELPERS
+# =========================================================
+
+run_dharma_checks <- function(model, model_name) {
+  cat("\n==================================================\n")
+  cat("DHARMa residual diagnostics:", model_name, "\n")
+  cat("==================================================\n")
+
+  sim_res <- simulateResiduals(
+    fittedModel = model,
+    n = 1000,
+    plot = FALSE
+  )
+
+  cat("\n----- Uniformity test -----\n")
+  print(testUniformity(sim_res))
+
+  cat("\n----- Dispersion test -----\n")
+  print(testDispersion(sim_res))
+
+  cat("\n----- Outlier test -----\n")
+  print(testOutliers(sim_res))
+
+  cat("\n----- Quantile test -----\n")
+  print(testQuantiles(sim_res))
+
+  plot(sim_res)
+
+  fitted_vals <- predict(model, type = "response")
+  plotResiduals(sim_res, form = fitted_vals)
+
+  invisible(sim_res)
+}
+
+run_gaussian_residual_checks <- function(model, model_name) {
+  cat("\n==================================================\n")
+  cat("Gaussian raw residual diagnostics:", model_name, "\n")
+  cat("==================================================\n")
+
+  pearson_res <- residuals(model, type = "pearson")
+  fitted_vals  <- predict(model, type = "response")
+
+  cat("\n----- Pearson residual summary -----\n")
+  print(summary(pearson_res))
+
+  op <- par(no.readonly = TRUE)
+  par(mfrow = c(2, 2))
+
+  hist(
+    pearson_res,
+    breaks = 40,
+    main = paste("Histogram of Pearson residuals\n", model_name),
+    xlab = "Pearson residuals"
+  )
+
+  qqnorm(
+    pearson_res,
+    main = paste("QQ plot of Pearson residuals\n", model_name)
+  )
+  qqline(pearson_res)
+
+  plot(
+    fitted_vals,
+    pearson_res,
+    xlab = "Fitted values",
+    ylab = "Pearson residuals",
+    main = paste("Residuals vs fitted\n", model_name)
+  )
+  abline(h = 0, lty = 2)
+
+  boxplot(
+    pearson_res,
+    horizontal = TRUE,
+    main = paste("Boxplot of Pearson residuals\n", model_name),
+    xlab = "Pearson residuals"
+  )
+
+  par(op)
+
+  invisible(pearson_res)
+}
+```
+
+
+
+```{r}
+# =========================================================
+# HEAD VELOCITY: 100 ms prior to fixation
+# log-Gaussian model
+# =========================================================
+
+head_dat <- ctx_fixations[, c(subj_col, cat_col, "head_vel_100ms_prior")]
+
+head_dat <- head_dat[
+  !is.na(head_dat[["head_vel_100ms_prior"]]) &
+    !is.na(head_dat[[cat_col]]) &
+    head_dat[["head_vel_100ms_prior"]] > 0,
+  ,
+  drop = FALSE
+]
+
+head_dat[[cat_col]]  <- factor(head_dat[[cat_col]])
+head_dat[[subj_col]] <- factor(head_dat[[subj_col]])
+
+present_order_head <- desired_order[desired_order %in% levels(head_dat[[cat_col]])]
+head_dat[[cat_col]] <- factor(head_dat[[cat_col]], levels = present_order_head)
+
+head_dat <- as_tibble(head_dat) %>%
+  mutate(log_head_vel_100ms_prior = log(head_vel_100ms_prior))
+
+# -----------------------------
+# Subject-level descriptives
+# -----------------------------
+head_subj_means <- head_dat %>%
+  group_by(.data[[subj_col]], .data[[cat_col]]) %>%
+  summarise(
+    mean_deg_s = mean(.data[["head_vel_100ms_prior"]]),
+    .groups    = "drop"
+  )
+
+head_group_summary <- head_subj_means %>%
+  group_by(.data[[cat_col]]) %>%
+  summarise(
+    subjects          = n(),
+    mean_of_subj_means = mean(mean_deg_s),
+    sd_of_subj_means   = sd(mean_deg_s),
+    .groups            = "drop"
+  )
+
+cat("\n===== Subject-level group summary: head velocity 100 ms prior (deg/s) =====\n")
+print(head_group_summary)
+
+# -----------------------------
+# Mixed model
+# -----------------------------
+cat("\nFitting glmmTMB: log(head_vel_100ms_prior) ~", cat_col, "+ (1|", subj_col, ")\n")
+
+head_model <- glmmTMB(
+  formula = log_head_vel_100ms_prior ~ ObjectCategoryMerged + (1 | SubjectID),
+  family  = gaussian(link = "identity"),
+  data    = head_dat
+)
+
+cat("\n===== Mixed model summary: log head velocity 100 ms prior =====\n")
+print(summary(head_model))
+
+cat("\n===== Type II Wald chi-square test: log head velocity 100 ms prior =====\n")
+print(Anova(head_model, type = "II"))
+
+# -----------------------------
+# Residual diagnostics
+# -----------------------------
+head_dharma_res <- run_dharma_checks(
+  model = head_model,
+  model_name = "log head velocity 100 ms prior"
+)
+
+head_gaussian_res <- run_gaussian_residual_checks(
+  model = head_model,
+  model_name = "log head velocity 100 ms prior"
+)
+
+palette_used_head <- palette_vals[present_order_head]
+
+# -----------------------------
+# Plot
+# -----------------------------
+p_head_subj <- ggplot(
+  head_subj_means,
+  aes(x = .data[[cat_col]], y = mean_deg_s, fill = .data[[cat_col]])
+) +
+  geom_violin(trim = FALSE, alpha = 0.5, color = NA) +
+  geom_boxplot(width = 0.15, outlier.shape = NA, alpha = 0.7) +
+  scale_fill_manual(values = palette_used_head) +
+  labs(
+    x     = "",
+    y     = "Head angular velocity 100 ms prior (deg/s)",
+    title = "Subject-level head angular velocity 100 ms before fixation onset\nby object category"
+  ) +
+  theme_minimal(base_size = 16) +
+  theme(legend.position = "none")
+
+print(p_head_subj)
+```
+
+
+```{r}
+# =========================================================
+# PREVIOUS SACCADE PEAK VELOCITY
+# log-Gaussian model
+# =========================================================
+
+peak_dat <- ctx_fixations[, c(subj_col, cat_col, "prev_saccade_peak_velocity_deg_per_s")]
+
+peak_dat <- peak_dat[
+  !is.na(peak_dat[["prev_saccade_peak_velocity_deg_per_s"]]) &
+    !is.na(peak_dat[[cat_col]]) &
+    peak_dat[["prev_saccade_peak_velocity_deg_per_s"]] > 0,
+  ,
+  drop = FALSE
+]
+
+peak_dat[[cat_col]]  <- factor(peak_dat[[cat_col]])
+peak_dat[[subj_col]] <- factor(peak_dat[[subj_col]])
+
+present_order_peak <- desired_order[desired_order %in% levels(peak_dat[[cat_col]])]
+peak_dat[[cat_col]] <- factor(peak_dat[[cat_col]], levels = present_order_peak)
+
+peak_dat <- as_tibble(peak_dat) %>%
+  mutate(log_prev_saccade_peak_velocity_deg_per_s = log(prev_saccade_peak_velocity_deg_per_s))
+
+# -----------------------------
+# Subject-level descriptives
+# -----------------------------
+peak_subj_means <- peak_dat %>%
+  group_by(.data[[subj_col]], .data[[cat_col]]) %>%
+  summarise(
+    mean_deg_s = mean(.data[["prev_saccade_peak_velocity_deg_per_s"]]),
+    .groups    = "drop"
+  )
+
+peak_group_summary <- peak_subj_means %>%
+  group_by(.data[[cat_col]]) %>%
+  summarise(
+    subjects          = n(),
+    mean_of_subj_means = mean(mean_deg_s),
+    sd_of_subj_means   = sd(mean_deg_s),
+    .groups            = "drop"
+  )
+
+cat("\n===== Subject-level group summary: previous saccade peak velocity (deg/s) =====\n")
+print(peak_group_summary)
+
+# -----------------------------
+# Mixed model
+# -----------------------------
+cat("\nFitting glmmTMB: log(prev_saccade_peak_velocity_deg_per_s) ~", cat_col, "+ (1|", subj_col, ")\n")
+
+peak_model <- glmmTMB(
+  formula = log_prev_saccade_peak_velocity_deg_per_s ~ ObjectCategoryMerged + (1 | SubjectID),
+  family  = gaussian(link = "identity"),
+  data    = peak_dat
+)
+
+cat("\n===== Mixed model summary: log previous saccade peak velocity =====\n")
+print(summary(peak_model))
+
+cat("\n===== Type II Wald chi-square test: log previous saccade peak velocity =====\n")
+print(Anova(peak_model, type = "II"))
+
+# -----------------------------
+# Residual diagnostics
+# -----------------------------
+peak_dharma_res <- run_dharma_checks(
+  model = peak_model,
+  model_name = "log previous saccade peak velocity"
+)
+
+peak_gaussian_res <- run_gaussian_residual_checks(
+  model = peak_model,
+  model_name = "log previous saccade peak velocity"
+)
+
+palette_used_peak <- palette_vals[present_order_peak]
+
+# -----------------------------
+# Plot
+# -----------------------------
+p_peak_subj <- ggplot(
+  peak_subj_means,
+  aes(x = .data[[cat_col]], y = mean_deg_s, fill = .data[[cat_col]])
+) +
+  geom_violin(trim = FALSE, alpha = 0.5, color = NA) +
+  geom_boxplot(width = 0.15, outlier.shape = NA, alpha = 0.7) +
+  scale_fill_manual(values = palette_used_peak) +
+  labs(
+    x     = "",
+    y     = "Previous saccade peak velocity (deg/s)",
+    title = "Subject-level previous saccade peak velocity\nby object category"
+  ) +
+  theme_minimal(base_size = 16) +
+  theme(legend.position = "none")
+
+print(p_peak_subj)
+```
+
+```{r}
+# =========================================================
+# FIXATION DURATION
+# Gamma(log) model
+# =========================================================
+
+len_dat <- ctx_fixations[, c(subj_col, cat_col, "length_ms")]
+
+len_dat <- len_dat[
+  !is.na(len_dat[["length_ms"]]) &
+    !is.na(len_dat[[cat_col]]) &
+    len_dat[["length_ms"]] > 0,
+  ,
+  drop = FALSE
+]
+
+len_dat[[cat_col]]  <- factor(len_dat[[cat_col]])
+len_dat[[subj_col]] <- factor(len_dat[[subj_col]])
+
+present_order_len <- desired_order[desired_order %in% levels(len_dat[[cat_col]])]
+len_dat[[cat_col]] <- factor(len_dat[[cat_col]], levels = present_order_len)
+
+len_dat <- as_tibble(len_dat)
+
+# -----------------------------
+# Subject-level descriptives
+# -----------------------------
+len_subj_means <- len_dat %>%
+  group_by(.data[[subj_col]], .data[[cat_col]]) %>%
+  summarise(
+    mean_len = mean(.data[["length_ms"]]),
+    .groups  = "drop"
+  )
+
+len_group_summary <- len_subj_means %>%
+  group_by(.data[[cat_col]]) %>%
+  summarise(
+    subjects          = n(),
+    mean_of_subj_means = mean(mean_len),
+    sd_of_subj_means   = sd(mean_len),
+    .groups            = "drop"
+  )
+
+cat("\n===== Subject-level group summary: fixation duration (ms) =====\n")
+print(len_group_summary)
+
+# -----------------------------
+# Mixed model
+# -----------------------------
+cat("\nFitting glmmTMB: length_ms ~", cat_col, "+ (1|", subj_col, ") with Gamma(log)\n")
+
+len_model_gamma <- glmmTMB(
+  formula = length_ms ~ ObjectCategoryMerged + (1 | SubjectID),
+  family  = Gamma(link = "log"),
+  data    = len_dat
+)
+
+cat("\n===== Mixed model summary: Gamma(log) fixation duration =====\n")
+print(summary(len_model_gamma))
+
+cat("\n===== Type II Wald chi-square test: Gamma(log) fixation duration =====\n")
+print(Anova(len_model_gamma, type = "II"))
+
+# -----------------------------
+# Residual diagnostics
+# -----------------------------
+len_gamma_dharma_res <- run_dharma_checks(
+  model = len_model_gamma,
+  model_name = "Gamma(log) fixation duration"
+)
+
+pearson_res_gamma <- residuals(len_model_gamma, type = "pearson")
+fitted_vals_gamma <- predict(len_model_gamma, type = "response")
+
+op <- par(no.readonly = TRUE)
+par(mfrow = c(1, 2))
+
+plot(
+  fitted_vals_gamma,
+  pearson_res_gamma,
+  xlab = "Fitted values",
+  ylab = "Pearson residuals",
+  main = "Residuals vs fitted\nGamma(log) fixation duration"
+)
+abline(h = 0, lty = 2)
+
+boxplot(
+  pearson_res_gamma,
+  horizontal = TRUE,
+  main = "Boxplot of Pearson residuals\nGamma(log) fixation duration",
+  xlab = "Pearson residuals"
+)
+
+par(op)
+
+palette_used_len <- palette_vals[present_order_len]
+
+# -----------------------------
+# Plot
+# -----------------------------
+p_len_subj <- ggplot(
+  len_subj_means,
+  aes(x = .data[[cat_col]], y = mean_len, fill = .data[[cat_col]])
+) +
+  geom_violin(trim = FALSE, alpha = 0.5, color = NA) +
+  geom_boxplot(width = 0.15, outlier.shape = NA, alpha = 0.7) +
+  scale_fill_manual(values = palette_used_len) +
+  labs(
+    x     = "",
+    y     = "Fixation duration (ms)",
+    title = "Subject-level fixation duration by object category"
+  ) +
+  theme_minimal(base_size = 16) +
+  theme(legend.position = "none")
+
+print(p_len_subj)
+```
+

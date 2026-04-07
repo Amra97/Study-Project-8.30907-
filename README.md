@@ -5,7 +5,6 @@ This repository contains analysis scripts for our study project on eye movements
 
 ```text
 ├── README.md
-├── datasets/
 ├── scripts/
 │   ├── 01_preprocessing_and_event_detection/
 │   ├── 02_turn_annotation_and_street_entries/

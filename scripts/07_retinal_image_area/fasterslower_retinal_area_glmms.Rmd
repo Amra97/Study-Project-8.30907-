@@ -1,0 +1,407 @@
+---
+title: "fasterslower_context_glmms"
+output: html_document
+date: "2025-11-24"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(readr)
+library(dplyr)
+library(lme4)
+library(emmeans)
+library(ggplot2)
+library(glmmTMB)
+library(effects)
+library(car)
+library(DHARMa)
+library(performance)
+library(effectsize)
+library(tidyr)
+```
+
+```{r}
+# ============================================================
+# Load data
+# ============================================================
+ctx <- read_csv("C:/Users/Marcel/Desktop/Study Project/VR Data/ctx_fasterslower.csv")
+
+ctx <- ctx %>%
+  mutate(
+    SubjectID = factor(SubjectID),
+    Residual  = factor(Residual, levels = c("Faster", "Slower")),
+    AmpBin    = factor(AmpBin, levels = sort(unique(AmpBin)))
+  )
+
+str(ctx)
+```
+
+```{r}
+# ============================================================
+# Build cell means
+# ============================================================
+ctx_cell <- ctx %>%
+  group_by(SubjectID, AmpBin, Residual) %>%
+  summarise(
+    n_sacc = n(),
+    prev_retinal_image_area_deg2 = mean(prev_retinal_image_area_deg2, na.rm = TRUE),
+    next_retinal_image_area_deg2 = mean(next_retinal_image_area_deg2, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+str(ctx_cell)
+```
+
+```{r}
+# ============================================================
+# Generic plotting helper
+# ============================================================
+plot_emmeans_retinal <- function(df_em, yvar, plot_subtitle, y_label, legend_position = "right") {
+  ggplot(
+    df_em,
+    aes(
+      x = AmpBin,
+      y = .data[[yvar]],
+      color = Residual,
+      group = Residual,
+      fill = Residual
+    )
+  ) +
+    geom_line(linewidth = 2.5, position = position_dodge(width = 0.35)) +
+    geom_point(aes(shape = Residual), size = 5,
+               position = position_dodge(width = 0.35)) +
+    geom_ribbon(
+      aes(ymin = lower_plot, ymax = upper_plot),
+      alpha = 0.10,
+      colour = NA,
+      position = position_dodge(width = 0.35)
+    ) +
+    scale_color_manual(
+      values = c(Faster = "springgreen4", Slower = "darkgoldenrod2"),
+      labels = c(
+        Faster = "Fast",
+        Slower = "Slow"
+      )
+    ) +
+    scale_fill_manual(
+      values = c(Faster = "springgreen4", Slower = "darkgoldenrod2"),
+      labels = c(
+        Faster = "Fast",
+        Slower = "Slow"
+      )
+    ) +
+    scale_shape_manual(
+      values = c(Faster = 16, Slower = 17),
+      labels = c(
+        Faster = "Fast",
+        Slower = "Slow"
+      )
+    ) +
+    labs(
+      subtitle = plot_subtitle,
+      color    = "Residual",
+      fill     = "Residual",
+      shape    = "Residual",
+      x        = NULL,
+      y        = y_label
+    ) +
+    theme_minimal() +
+    theme(
+      text = element_text(size = 20),
+      legend.position = legend_position,
+      plot.subtitle = element_text(size = 26),
+      axis.title.y = element_text(size = 26),
+      axis.text.x = element_text(
+        size = 22, face = "bold", angle = 45,
+        hjust = 1, vjust = 1
+      ),
+      axis.text.y = element_text(size = 24),
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank()
+    )
+}
+```
+
+```{r}
+# ============================================================
+# run_retinal_lmm_log
+#
+# Fits a Gaussian mixed-effects model to log-transformed estimated
+# retinal image area at the saccade origin or target:
+#   log(outcome) ~ AmpBin * Residual + (1 | SubjectID)
+#
+# The function:
+#   - filters invalid retinal image area values (must be finite and > 0)
+#   - log-transforms the dependent variable
+#   - fits the mixed model with glmmTMB
+#   - evaluates model diagnostics
+#   - tests fixed effects using Type II Wald chi-square tests
+#   - computes estimated marginal means for each Residual × AmpBin cell
+#   - back-transforms those marginal means to the original deg² scale
+#     for plotting
+#   - computes Fast vs Slow contrasts within each amplitude bin
+#   - applies multiplicity correction across bins via cross.adjust
+#   - back-transforms contrasts to ratios for interpretation:
+#       ratio > 1  = Fast > Slow
+#       ratio < 1  = Fast < Slow
+#
+# Returns a list containing:
+#   - fitted model
+#   - residual diagnostics
+#   - estimated marginal means
+#   - plotting data
+#   - within-bin contrast tables
+#   - plot
+# ============================================================
+run_retinal_lmm_log <- function(
+  dat,
+  outcome_var,
+  outcome_label,
+  level_label,
+  y_label = NULL,
+  legend_position = "bottom",
+  contrast_adjust = "holm"
+) {
+  if (is.null(y_label)) {
+    y_label <- "Retinal image area (deg²)"
+  }
+
+  dat_model <- dat %>%
+    dplyr::filter(
+      is.finite(.data[[outcome_var]]),
+      .data[[outcome_var]] > 0
+    ) %>%
+    dplyr::mutate(
+      outcome_log = log(.data[[outcome_var]])
+    )
+
+  form_str <- "outcome_log ~ AmpBin * Residual + (1 | SubjectID)"
+
+  m <- glmmTMB(
+    as.formula(form_str),
+    data = dat_model,
+    family = gaussian(link = "identity"),
+    control = glmmTMBControl(
+      optimizer = optim,
+      optArgs = list(method = "BFGS")
+    )
+  )
+
+  res <- simulateResiduals(fittedModel = m, n = 1000, refit = FALSE)
+  plot(res)
+
+  cat("\n====================================================\n")
+  cat("Gaussian mixed model on log DV\n")
+  cat("Outcome:", outcome_var, "\n")
+  cat("Level:", level_label, "\n")
+  cat("====================================================\n")
+  print(summary(m))
+  print(Anova(m))
+  print(check_model(m))
+
+  # ------------------------------------------------------------
+  # Estimated marginal means for plotting
+  # ------------------------------------------------------------
+  em_plot <- emmeans(m, ~ AmpBin * Residual)
+  df_em <- as.data.frame(confint(em_plot, level = 0.83))
+
+  df_em <- df_em %>%
+    dplyr::mutate(
+      emmean_plot = exp(emmean),
+      lower_plot  = exp(lower.CL),
+      upper_plot  = exp(upper.CL)
+    )
+
+  # ------------------------------------------------------------
+  # Fast vs Slow contrasts within each amplitude bin
+  # Contrasts are estimated on the log scale because the model is
+  # fitted to log-transformed retinal image area.
+  #
+  # p-values are adjusted across amplitude bins using cross.adjust.
+  #
+  # After back-transformation:
+  #   ratio > 1  => Fast > Slow
+  #   ratio < 1  => Fast < Slow
+  # ------------------------------------------------------------
+  em_contr <- emmeans(m, ~ Residual | AmpBin)
+
+  bin_contrasts <- contrast(
+    em_contr,
+    method = "pairwise"
+  )
+
+  bin_contrasts_df <- as.data.frame(
+    summary(
+      bin_contrasts,
+      infer = c(TRUE, TRUE),
+      adjust = "none",
+      cross.adjust = contrast_adjust
+    )
+  )
+
+  bin_contrasts_df <- bin_contrasts_df %>%
+    dplyr::mutate(
+      ratio = exp(estimate),
+      lower_ratio = exp(lower.CL),
+      upper_ratio = exp(upper.CL),
+      direction = dplyr::case_when(
+        ratio > 1 ~ "Fast > Slow",
+        ratio < 1 ~ "Fast < Slow",
+        TRUE ~ "Fast = Slow"
+      )
+    )
+
+  sig_bin_contrasts_df <- bin_contrasts_df %>%
+    dplyr::filter(p.value < 0.05)
+
+  cat("\n=== Fast vs Slow contrasts within AmpBin for", outcome_var, "===\n")
+  print(bin_contrasts_df)
+
+  cat("\n=== Significant Fast vs Slow contrasts within AmpBin for", outcome_var, "===\n")
+  print(sig_bin_contrasts_df)
+
+  # ------------------------------------------------------------
+  # Plot
+  # ------------------------------------------------------------
+  p <- plot_emmeans_retinal(
+    df_em = df_em,
+    yvar = "emmean_plot",
+    plot_subtitle = paste0(
+      "Back-transformed estimated retinal image area at ",
+      outcome_label
+    ),
+    y_label = y_label,
+    legend_position = legend_position
+  )
+
+  print(p)
+
+  invisible(list(
+    model = m,
+    residuals = res,
+    emmeans_plot = em_plot,
+    em_df = df_em,
+    emmeans_contrasts = em_contr,
+    contrasts = bin_contrasts,
+    contrasts_df = bin_contrasts_df,
+    significant_contrasts_df = sig_bin_contrasts_df,
+    plot = p
+  ))
+}
+```
+
+
+
+Run models: next retinal image area
+Saccade-level
+```{r}
+res_next_log_sacc <- run_retinal_lmm_log(
+  dat = ctx,
+  outcome_var = "next_retinal_image_area_deg2",
+  outcome_label = "saccade target",
+  level_label = "saccade-level",
+  y_label = "Retinal image area (deg²)"
+)
+```
+
+
+
+
+
+
+
+
+Run models: previous retinal image area
+Saccade-level
+```{r}
+res_prev_log_sacc <- run_retinal_lmm_log(
+  dat = ctx,
+  outcome_var = "prev_retinal_image_area_deg2",
+  outcome_label = "saccade origin",
+  level_label = "saccade-level",
+  y_label = "Retinal image area (deg²)"
+)
+```
+```{r}
+# ---------------------------------------------------------
+# Save retinal image area model plots
+# ---------------------------------------------------------
+plot_dir <- "C:/Users/Marcel/Desktop/Study Project/VR Data/Plots"
+
+# Create folder if it does not exist
+if (!dir.exists(plot_dir)) {
+  dir.create(plot_dir, recursive = TRUE)
+}
+
+# Collect retinal plots in a named list
+retinal_plot_list <- list(
+  next_retinal_image_area = res_next_log_sacc$plot,
+  prev_retinal_image_area = res_prev_log_sacc$plot
+)
+
+# Save each plot
+for (plot_name in names(retinal_plot_list)) {
+  ggsave(
+    filename = file.path(plot_dir, paste0(plot_name, ".png")),
+    plot     = retinal_plot_list[[plot_name]],
+    width    = 12,
+    height   = 8,
+    dpi      = 300
+  )
+}
+```
+
+
+Counts
+```{r}
+prev_counts <- ctx %>%
+  mutate(prev_valid = is.finite(prev_retinal_image_area_deg2) & prev_retinal_image_area_deg2 > 0) %>%
+  group_by(AmpBin, Residual) %>%
+  summarise(
+    n_total = n(),
+    n_prev_valid = sum(prev_valid, na.rm = TRUE),
+    pct_prev_valid = 100 * n_prev_valid / n_total,
+    .groups = "drop"
+  )
+
+next_counts <- ctx %>%
+  mutate(next_valid = is.finite(next_retinal_image_area_deg2) & next_retinal_image_area_deg2 > 0) %>%
+  group_by(AmpBin, Residual) %>%
+  summarise(
+    n_total = n(),
+    n_next_valid = sum(next_valid, na.rm = TRUE),
+    pct_next_valid = 100 * n_next_valid / n_total,
+    .groups = "drop"
+  )
+
+print(prev_counts, n = Inf)
+print(next_counts, n = Inf)
+
+
+valid_counts_wide <- ctx %>%
+  mutate(
+    prev_valid = is.finite(prev_retinal_image_area_deg2) & prev_retinal_image_area_deg2 > 0,
+    next_valid = is.finite(next_retinal_image_area_deg2) & next_retinal_image_area_deg2 > 0
+  ) %>%
+  group_by(AmpBin, Residual) %>%
+  summarise(
+    n_total      = n(),
+    n_prev_valid = sum(prev_valid, na.rm = TRUE),
+    n_next_valid = sum(next_valid, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  pivot_wider(
+    names_from = Residual,
+    values_from = c(n_total, n_prev_valid, n_next_valid)
+  )
+
+print(valid_counts_wide, n = Inf)
+```
+
+
+
+
+

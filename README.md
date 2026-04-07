@@ -8,13 +8,12 @@ This repository contains analysis scripts for our study project on eye movements
 ├── scripts/
 │   ├── 01_preprocessing_and_event_detection/
 │   ├── 02_turn_annotation_and_street_entries/
-│   ├── 03_global_saccade_analyses/
-│   ├── 04_short_long_context/
-│   ├── 05_fast_slow_amplitude_adjusted/
-│   ├── 06_turn_related_analyses/
-│   ├── 07_object_and_fixation_analyses/
-│   ├── 08_retinal_image_area/
-│   ├── 09_other/
+│   ├── 03_short_long_saccades/
+│   ├── 04_fast_slow_amplitude_adjusted_saccades/
+│   ├── 05_turn_related_analyses/
+│   ├── 06_global_object_and_fixation_analyses/
+│   ├── 07_retinal_image_area/
+│   ├── 08_other/
 ```
 
 ## Notes

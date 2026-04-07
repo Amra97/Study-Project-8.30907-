@@ -1,5 +1,3 @@
 ## Scripts
 
-- `[script_name.fileending]` — [brief description of what the script does]
-
-- `[script_name.fileending]` — [brief description of what the script does]
+- `fixations_per_collider_turn1&2.py` — Computes fixation counts per collider or object around turns, including comparisons between first and repeated street entries.

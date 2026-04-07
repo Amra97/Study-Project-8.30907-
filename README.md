@@ -14,6 +14,7 @@ This repository contains analysis scripts for our study project on eye movements
 │   ├── 06_turn_related_analyses/
 │   ├── 07_object_and_fixation_analyses/
 │   ├── 08_retinal_image_area/
+│   ├── 09_other/
 ```
 
 ## Notes

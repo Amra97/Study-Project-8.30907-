@@ -1,0 +1,571 @@
+---
+title: "fasterslower_context_glmms"
+output: html_document
+date: "2025-11-24"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(readr)
+library(dplyr)
+library(lme4)
+library(emmeans)
+library(ggplot2)
+library(glmmTMB)
+library(effects)
+library(car)
+library(DHARMa)
+library(performance)
+library(effectsize)
+```
+
+```{r}
+ctx <- read_csv("C:/Users/Marcel/Desktop/Study Project/VR Data/ctx_fasterslower.csv")
+
+ctx <- ctx %>%
+  mutate(
+    SubjectID   = factor(SubjectID),
+    Residual   = factor(Residual, levels = c("Faster","Slower")),
+    AmpBin      = factor(AmpBin, levels = sort(unique(AmpBin))),    
+    within_object   = as.numeric(within_object),
+    category_switch = as.numeric(category_switch),
+    next_is_novel   = as.numeric(next_is_novel),
+    prev_is_novel   = as.numeric(prev_is_novel)
+  )
+
+ctx <- ctx |>
+  mutate(
+    Faster01  = as.integer(Residual == "Faster")
+  )
+  
+str(ctx)
+
+# Calculate group means per cell (Faster/Slower within AmpBins) since glmms on these cell means are more normally distributed than running the glmm's with the continuous dependent variables on a saccade level.
+ctx_cell <- ctx %>%
+  group_by(SubjectID, AmpBin, Residual) %>%
+  summarise(
+    # total saccades in this cell
+    n_sacc = n(),
+
+    # ----- continuous context: cell means -----
+    prev_fix_ms      = mean(prev_fix_ms,      na.rm = TRUE),
+    post_fix_ms      = mean(post_fix_ms,      na.rm = TRUE),
+    prev_sacc_amp_deg = mean(prev_sacc_amp_deg, na.rm = TRUE),
+    prev_sacc_dur_ms  = mean(prev_sacc_dur_ms,  na.rm = TRUE),
+    next_sacc_amp_deg = mean(next_sacc_amp_deg, na.rm = TRUE),
+    next_sacc_dur_ms  = mean(next_sacc_dur_ms,  na.rm = TRUE),
+    prev_dist        = mean(prev_dist,        na.rm = TRUE),
+    next_dist        = mean(next_dist,        na.rm = TRUE),
+    head_pre         = mean(head_pre,         na.rm = TRUE),
+    head_post        = mean(head_post,        na.rm = TRUE)
+  ) %>%
+  ungroup() 
+
+str(ctx_cell)
+
+set.seed(1)
+
+ctx$AmpBin_num <- as.numeric(ctx$AmpBin)
+```
+
+```{r}
+# ------------------------------------------------------------------------------
+# run_context_glmm
+#
+# Fits a binomial GLMM:
+#   context_var ~ AmpBin * Residual + (1 | SubjectID)
+#
+# In addition to the model and plot, this function also:
+#   - computes Fast vs Slow contrasts within each amplitude bin
+#   - applies multiplicity correction ACROSS the full set of bin-wise contrasts
+#     via cross.adjust in summary()
+#   - prints both the full contrast table and the significant contrasts
+#
+# Note:
+#   Using adjust = "holm" directly inside contrast() is not sufficient here,
+#   because there is only one Fast-vs-Slow contrast per AmpBin. To adjust
+#   across all amplitude bins, the correction must be applied across the set
+#   of by-group contrasts via cross.adjust.
+# ------------------------------------------------------------------------------
+run_context_glmm <- function(
+  ctx,
+  context_var,
+  context_label,
+  y_limit = c(0, 1),
+  legend_position = "bottom",
+  contrast_adjust = "holm"
+) {
+  form_str <- paste0(context_var, " ~ AmpBin * Residual + (1 | SubjectID)")
+
+  m <- glmmTMB(
+    as.formula(form_str),
+    data = ctx,
+    family = binomial(link = "logit"),
+    control = glmmTMBControl(
+      optimizer = optim,
+      optArgs = list(method = "BFGS")
+    )
+  )
+
+  res <- simulateResiduals(fittedModel = m, n = 1000, refit = FALSE)
+  plot(res)
+
+  cat("\n=== GLMM for", context_var, "~ AmpBin * Residual ===\n")
+  print(summary(m))
+  print(Anova(m))
+
+  # --------------------------------------------------------------------------
+  # Estimated marginal means for plotting on the response scale
+  # --------------------------------------------------------------------------
+  em_plot <- emmeans(m, ~ AmpBin * Residual, type = "response")
+  df_em <- as.data.frame(confint(em_plot, level = 0.83))
+
+  # --------------------------------------------------------------------------
+  # Fast vs Slow contrasts within each amplitude bin
+  #
+  # Important:
+  #   We first compute the pairwise contrasts without adjustment inside
+  #   contrast(). Then we apply the multiple-comparison correction across the
+  #   full set of AmpBin-specific contrasts using cross.adjust in summary().
+  # --------------------------------------------------------------------------
+  em_contr <- emmeans(m, ~ Residual | AmpBin, type = "response")
+
+  bin_contrasts <- contrast(
+    em_contr,
+    method = "pairwise"
+  )
+
+  bin_contrasts_df <- as.data.frame(
+    summary(
+      bin_contrasts,
+      infer = c(TRUE, TRUE),
+      adjust = "none",
+      cross.adjust = contrast_adjust
+    )
+  )
+
+  sig_bin_contrasts_df <- bin_contrasts_df %>%
+    dplyr::filter(p.value < 0.05)
+
+  cat("\n=== Fast vs Slow contrasts within AmpBin for", context_var, "===\n")
+  print(bin_contrasts_df)
+
+  cat("\n=== Significant Fast vs Slow contrasts within AmpBin for", context_var, "===\n")
+  print(sig_bin_contrasts_df)
+
+  # --------------------------------------------------------------------------
+  # Plot
+  # --------------------------------------------------------------------------
+  p <- ggplot(
+    df_em,
+    aes(
+      x = AmpBin,
+      y = prob,
+      color = Residual,
+      group = Residual,
+      fill = Residual
+    )
+  ) +
+    geom_line(
+      linewidth = 2.5,
+      position = position_dodge(width = 0.35)
+    ) +
+    geom_point(
+      aes(shape = Residual),
+      size = 5,
+      position = position_dodge(width = 0.35)
+    ) +
+    geom_ribbon(
+      aes(ymin = asymp.LCL, ymax = asymp.UCL),
+      alpha = 0.30,
+      colour = NA,
+      position = position_dodge(width = 0.35)
+    ) +
+    scale_y_continuous(
+      limits = y_limit,
+      expand = expansion(mult = c(0.02, 0.04))
+    ) +
+    scale_color_manual(
+      values = c(Faster = "springgreen4", Slower = "darkgoldenrod2"),
+      labels = c(
+        Faster = "Fast",
+        Slower = "Slow"
+      )
+    ) +
+    scale_fill_manual(
+      values = c(Faster = "springgreen4", Slower = "darkgoldenrod2"),
+      labels = c(
+        Faster = "Fast",
+        Slower = "Slow"
+      )
+    ) +
+    scale_shape_manual(
+      values = c(Faster = 16, Slower = 17),
+      labels = c(
+        Faster = "Fast",
+        Slower = "Slow"
+      )
+    ) +
+    labs(
+      subtitle = paste0("Model-estimated P(", context_label, ") by amplitude bin"),
+      color = "Residual",
+      fill = "Residual",
+      shape = "Residual",
+      x = NULL,
+      y = "Probability (model-based, logit GLMM)"
+    ) +
+    theme_minimal() +
+    theme(
+      text = element_text(size = 20),
+      legend.position = legend_position,
+      plot.subtitle = element_text(size = 26),
+      axis.title.y = element_text(size = 26),
+      axis.text.x = element_text(
+        size = 22,
+        face = "bold",
+        angle = 45,
+        hjust = 1,
+        vjust = 1
+      ),
+      axis.text.y = element_text(size = 24),
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank()
+    )
+
+  print(p)
+
+  invisible(list(
+    model = m,
+    residuals = res,
+    emmeans_plot = em_plot,
+    em_df = df_em,
+    emmeans_contrasts = em_contr,
+    contrasts = bin_contrasts,
+    contrasts_df = bin_contrasts_df,
+    significant_contrasts_df = sig_bin_contrasts_df,
+    plot = p
+  ))
+}
+
+
+# ------------------------------------------------------------------------------
+# run_continuous_context_lmm
+#
+# Fits a Gaussian mixed model on subject × residual × amplitude-bin cell means:
+#   outcome_var ~ AmpBin * Residual + (1 | SubjectID)
+#
+# In addition to the model and plot, this function also:
+#   - computes Fast vs Slow contrasts within each amplitude bin
+#   - applies multiplicity correction ACROSS the full set of bin-wise contrasts
+#     via cross.adjust in summary()
+#   - prints both the full contrast table and the significant contrasts
+#
+# Note:
+#   As above, using adjust = "holm" directly inside contrast() is not sufficient
+#   for correction across amplitude bins. The adjustment must be applied across
+#   the set of by-group contrasts via cross.adjust.
+# ------------------------------------------------------------------------------
+run_continuous_context_lmm <- function(
+  ctx_cell,
+  outcome_var,
+  outcome_label,
+  y_label = NULL,
+  legend_position = "bottom",
+  contrast_adjust = "holm"
+) {
+  if (is.null(y_label)) {
+    y_label <- outcome_label
+  }
+
+  form_str <- paste0(outcome_var, " ~ AmpBin * Residual + (1 | SubjectID)")
+
+  m <- glmmTMB(
+    as.formula(form_str),
+    data = ctx_cell,
+    family = gaussian(link = "identity"),
+    control = glmmTMBControl(
+      optimizer = optim,
+      optArgs = list(method = "BFGS")
+    )
+  )
+
+  res <- simulateResiduals(fittedModel = m, n = 1000, refit = FALSE)
+  plot(res)
+
+  cat("\n=== Gaussian GLMM (cell level) for", outcome_var, "~ AmpBin * Residual ===\n")
+  print(summary(m))
+  print(Anova(m))
+
+  # --------------------------------------------------------------------------
+  # Estimated marginal means for plotting
+  # --------------------------------------------------------------------------
+  em_plot <- emmeans(m, ~ AmpBin * Residual)
+  df_em <- as.data.frame(confint(em_plot, level = 0.83))
+
+  # --------------------------------------------------------------------------
+  # Fast vs Slow contrasts within each amplitude bin
+  #
+  # Important:
+  #   We first compute the pairwise contrasts without adjustment inside
+  #   contrast(). Then we apply the multiple-comparison correction across the
+  #   full set of AmpBin-specific contrasts using cross.adjust in summary().
+  # --------------------------------------------------------------------------
+  em_contr <- emmeans(m, ~ Residual | AmpBin)
+
+  bin_contrasts <- contrast(
+    em_contr,
+    method = "pairwise"
+  )
+
+  bin_contrasts_df <- as.data.frame(
+    summary(
+      bin_contrasts,
+      infer = c(TRUE, TRUE),
+      adjust = "none",
+      cross.adjust = contrast_adjust
+    )
+  )
+
+  sig_bin_contrasts_df <- bin_contrasts_df %>%
+    dplyr::filter(p.value < 0.05)
+
+  cat("\n=== Fast vs Slow contrasts within AmpBin for", outcome_var, "===\n")
+  print(bin_contrasts_df)
+
+  cat("\n=== Significant Fast vs Slow contrasts within AmpBin for", outcome_var, "===\n")
+  print(sig_bin_contrasts_df)
+
+  # --------------------------------------------------------------------------
+  # Plot
+  # --------------------------------------------------------------------------
+  p <- ggplot(
+    df_em,
+    aes(
+      x = AmpBin,
+      y = emmean,
+      color = Residual,
+      group = Residual,
+      fill = Residual
+    )
+  ) +
+    geom_line(
+      linewidth = 2.5,
+      position = position_dodge(width = 0.35)
+    ) +
+    geom_point(
+      aes(shape = Residual),
+      size = 5,
+      position = position_dodge(width = 0.35)
+    ) +
+    geom_ribbon(
+      aes(ymin = lower.CL, ymax = upper.CL),
+      alpha = 0.30,
+      colour = NA,
+      position = position_dodge(width = 0.35)
+    ) +
+    scale_color_manual(
+      values = c(Faster = "springgreen4", Slower = "darkgoldenrod2"),
+      labels = c(
+        Faster = "Fast",
+        Slower = "Slow"
+      )
+    ) +
+    scale_fill_manual(
+      values = c(Faster = "springgreen4", Slower = "darkgoldenrod2"),
+      labels = c(
+        Faster = "Fast",
+        Slower = "Slow"
+      )
+    ) +
+    scale_shape_manual(
+      values = c(Faster = 16, Slower = 17),
+      labels = c(
+        Faster = "Fast",
+        Slower = "Slow"
+      )
+    ) +
+    labs(
+      subtitle = paste0("Estimated mean ", outcome_label, " by amplitude bin"),
+      color = "Residual",
+      fill = "Residual",
+      shape = "Residual",
+      x = NULL,
+      y = y_label
+    ) +
+    theme_minimal() +
+    theme(
+      text = element_text(size = 20),
+      legend.position = legend_position,
+      plot.subtitle = element_text(size = 26),
+      axis.title.y = element_text(size = 26),
+      axis.text.x = element_text(
+        size = 22,
+        face = "bold",
+        angle = 45,
+        hjust = 1,
+        vjust = 1
+      ),
+      axis.text.y = element_text(size = 24),
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank()
+    )
+
+  print(p)
+
+  invisible(list(
+    model = m,
+    residuals = res,
+    emmeans_plot = em_plot,
+    em_df = df_em,
+    emmeans_contrasts = em_contr,
+    contrasts = bin_contrasts,
+    contrasts_df = bin_contrasts_df,
+    significant_contrasts_df = sig_bin_contrasts_df,
+    plot = p
+  ))
+}
+```
+
+```{r}
+res_within <- run_context_glmm(
+  ctx,
+  context_var    = "within_object",
+  context_label  = "within object",
+  y_limit        = c(0, 0.9)
+)
+```
+```{r}
+res_switch <- run_context_glmm(
+  ctx,
+  context_var    = "category_switch",
+  context_label  = "category switch",
+  y_limit        = c(0, 0.6)
+)
+```
+
+```{r}
+res_nextnovel <- run_context_glmm(
+  ctx,
+  context_var    = "next_is_novel",
+  context_label  = "next is novel",
+  y_limit        = c(0, 0.3)
+)
+
+```
+
+```{r}
+res_prevnovel <- run_context_glmm(
+  ctx,
+  context_var    = "prev_is_novel",
+  context_label  = "previous fixation is novel",
+  y_limit        = c(0, 0.3)
+)
+```
+
+
+
+
+
+
+
+Continuous Dependent Variables:
+```{r}
+# prev_fix_ms as outcome
+res_prev_fix <- run_continuous_context_lmm(
+  ctx_cell,
+  outcome_var   = "prev_fix_ms",
+  outcome_label = "Previous fixation duration (ms)"
+)
+```
+
+```{r}
+# post_fix_ms as outcome
+res_post_fix <- run_continuous_context_lmm(
+  ctx_cell,
+  outcome_var   = "post_fix_ms",
+  outcome_label = "Subsequent fixation duration (ms)"
+)
+
+```
+
+
+
+```{r}
+# prev_dist as outcome
+res_prev_dist <- run_continuous_context_lmm(
+  ctx_cell,
+  outcome_var   = "prev_dist",
+  outcome_label = "Previous distance (m)"
+)
+```
+
+```{r}
+# next_dist as outcome
+res_next_dist <- run_continuous_context_lmm(
+  ctx_cell,
+  outcome_var   = "next_dist",
+  outcome_label = "Next distance (m)"
+)
+```
+
+```{r}
+# head_pre as outcome
+res_head_pre <- run_continuous_context_lmm(
+  ctx_cell,
+  outcome_var   = "head_pre",
+  outcome_label = "Head velocity pre (deg/s)"
+)
+```
+
+```{r}
+# head_post as outcome
+res_head_post <- run_continuous_context_lmm(
+  ctx_cell,
+  outcome_var   = "head_post",
+  outcome_label = "Head velocity post (deg/s)"
+)
+```
+
+```{r}
+# ---------------------------------------------------------
+# Save contextual model plots
+# ---------------------------------------------------------
+plot_dir <- "C:/Users/Marcel/Desktop/Study Project/VR Data/Plots"
+
+# Create folder if it does not exist
+if (!dir.exists(plot_dir)) {
+  dir.create(plot_dir, recursive = TRUE)
+}
+
+# Collect plots in a named list
+plot_list <- list(
+  within_object   = res_within$plot,
+  category_switch = res_switch$plot,
+  next_is_novel   = res_nextnovel$plot,
+  prev_is_novel   = res_prevnovel$plot,
+  prev_fix_ms     = res_prev_fix$plot,
+  post_fix_ms     = res_post_fix$plot,
+  prev_dist       = res_prev_dist$plot,
+  next_dist       = res_next_dist$plot,
+  head_pre        = res_head_pre$plot,
+  head_post       = res_head_post$plot
+)
+
+# Save each plot
+for (plot_name in names(plot_list)) {
+  ggsave(
+    filename = file.path(plot_dir, paste0(plot_name, ".png")),
+    plot     = plot_list[[plot_name]],
+    width    = 12,
+    height   = 8,
+    dpi      = 300
+  )
+}
+```
+
+
+
+
